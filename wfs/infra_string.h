@@ -6,7 +6,7 @@
 
 typedef struct InfraString_s {
   char *data;
-  _Atomic(int_least32_t) refcnt;
+  _Atomic int_least32_t refcnt;
   uint32_t size;
   uint32_t cap;
 } InfraString;
@@ -37,5 +37,8 @@ infra_string_zero(InfraString *string)
   if (string != NULL && string->size != 0)
     memset(string->data, 0, string->cap);
 }
+
+void infra_string_put_char(InfraString *string, char c);
+void infra_string_put_codepoint(InfraString *string, uint32_t c);
 
 #endif /* _LIBWFS_INFRA_STRING_H */

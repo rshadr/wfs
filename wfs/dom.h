@@ -11,8 +11,8 @@ typedef struct DOMInterface_s DOMInterface;
 
 typedef struct DOMHeader_s {
   const DOMInterface *interface;
-  _Atomic(int_least32_t) strong_refcnt;
-  _Atomic(int_least32_t) weak_refcnt;
+  _Atomic int_least32_t strong_refcnt;
+  _Atomic int_least32_t weak_refcnt;
 } DOMHeader;
 
 typedef struct DOMObject_s {
