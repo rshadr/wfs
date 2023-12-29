@@ -24,4 +24,6 @@ infra_stack_peek(InfraStack *stack)
   return stack->items[stack->size - 1];
 }
 
+#define INFRA_STACK_FOREACH(stack, index) for (int32_t index = 0; index < (stack)->size; index++)
+
 #endif /* _LIBWFS_INFRA_STACK_H */

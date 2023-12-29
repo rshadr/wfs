@@ -17,7 +17,7 @@
 
 #include <stdbool.h>
 #include <stdio.h>
-
+#include <string.h>
 #include <grapheme.h>
 
 #include <wfs/dom.h>
@@ -25,6 +25,7 @@
 #include <wfs/html_parse.h>
 
 #include <wfs/infra_string.h>
+#include <wfs/infra_stack.h>
 
 #include "unicode.h"
 
@@ -47,8 +48,9 @@ enum token_type {
 
 struct tag {
   InfraString *tagname;
+  InfraStack *attrs;
+
   uint16_t localname;
-  void *attrs;
 
   bool self_closing_fl;
   bool ack_self_closing_fl;
@@ -74,6 +76,11 @@ union token_data {
   struct doctype  doctype;
   InfraString *   comment;
   uint32_t        c;
+};
+
+struct insertion_location {
+  struct dom_node *parent; // phantom reference
+  struct dom_node *child; // phantom reference
 };
 
 enum tokenizer_state {
@@ -170,6 +177,8 @@ struct tokenizer {
 
   struct treebuilder *treebuilder;
 
+  InfraString *tmpbuf;
+
   struct tag *tag;
   struct attr *attr;
   InfraString *comment;
@@ -220,6 +229,8 @@ enum treebuilder_mode {
 struct treebuilder {
   struct tokenizer *tokenizer;
 
+  struct dom_document *document; // strong reference
+
   int script_nesting;
 
   enum treebuilder_mode mode;
@@ -233,9 +244,12 @@ enum treebuilder_status {
   TREEBUILDER_STATUS_EOF,
 };
 
-// typedef enum treebuilder_status (*insertion_mode_handler) (struct treebuilder *treebuilder,
+typedef enum treebuilder_status (*treebuilder_mode_handler) (struct treebuilder *treebuilder,
+                                                             union token_data *token_data,
+                                                             enum token_type token_type);
 
 static void tokenizer_error(struct tokenizer *tokenizer, const char *msg);
+static void treebuilder_error(struct treebuilder *treebuilder);
 static void tokenizer_mainloop(struct tokenizer *tokenizer);
 static int_least32_t tokenizer_getc(struct tokenizer *tokenizer);
 
@@ -244,6 +258,10 @@ static int tokenizer_cmp_consume(struct tokenizer *tokenizer,
                                   const char *s, size_t slen);
 static int tokenizer_match(struct tokenizer *tokenizer, const char *s, size_t slen);
 static int tokenizer_matchcase(struct tokenizer *tokenizer, const char *s, size_t slen);
+
+static void acknowledge_self_closing_fl(struct tag *tag);
+static int appropriate_end_tag(struct tokenizer *tokenizer);
+static inline int char_ref_in_attr(struct tokenizer *tokenizer);
 
 static void create_doctype(struct tokenizer *tokenizer);
 static void destroy_tag(struct tag *tag);
@@ -263,31 +281,74 @@ static inline enum token_type char_to_type(uint32_t c);
 static void emit_character(struct tokenizer *tokenizer, uint32_t c);
 static enum tokenizer_status emit_eof(struct tokenizer *tokenizer);
 
-static void create_parser(struct tokenizer *tokenizer, struct treebuilder *treebuilder);
+static enum treebuilder_status tree_construction_dispatcher(struct treebuilder *treebuilder,
+                                                            union token_data *token_data,
+                                                            enum token_type token_type);
+static void insert_character(struct treebuilder *treebuilder, uint32_t c);
+static void insert_comment(struct treebuilder *treebuilder, InfraString *comment,
+                           struct insertion_location position);
+
+static void create_parser(struct tokenizer *tokenizer, struct treebuilder *treebuilder,
+                          struct dom_document *document, const char *input,
+                          size_t input_len);
 static void free_parser(struct tokenizer *tokenizer, struct treebuilder *treebuilder);
 
 static enum tokenizer_status data_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status rcdata_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status rawtext_state(struct tokenizer *tokenizer, int32_t c);
 static enum tokenizer_status tag_open_state(struct tokenizer *tokenizer, int32_t c);
 static enum tokenizer_status end_tag_open_state(struct tokenizer *tokenizer, int32_t c);
 static enum tokenizer_status tag_name_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status rcdata_lt_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status rcdata_end_tag_open_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status rcdata_end_tag_name_state(struct tokenizer *tokenizer, int32_t c);
 static enum tokenizer_status before_attr_name_state(struct tokenizer *tokenizer, int32_t c);
 static enum tokenizer_status attr_name_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status after_attr_name_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status before_attr_value_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status attr_value_double_quoted_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status attr_value_single_quoted_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status attr_value_unquoted_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status after_attr_value_quoted_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status self_closing_start_tag_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status bogus_comment_state(struct tokenizer *tokenizer, int32_t c);
 static enum tokenizer_status markup_decl_open_state(struct tokenizer *tokenizer, int32_t c);
 static enum tokenizer_status doctype_state(struct tokenizer *tokenizer, int32_t c);
 static enum tokenizer_status before_doctype_name_state(struct tokenizer *tokenizer, int32_t c);
 static enum tokenizer_status doctype_name_state(struct tokenizer *tokenizer, int32_t c);
 
+static enum treebuilder_status initial_mode(struct treebuilder *treebuilder,
+                                            union token_data *token_data,
+                                            enum token_type token_type);
+#if 0
+static enum treebuilder_status before_html_mode(struct treebuilder *treebuilder,
+                                                union token_data *token_data,
+                                                enum token_type token_type);
+#endif
+
 /* globals */
 static const tokenizer_state_handler k_tokenizer_states[NUM_STATES] = {
   [DATA_STATE] = data_state,
+  [RCDATA_STATE] = rcdata_state,
+  [RAWTEXT_STATE] = rawtext_state,
   /* ... */
   [TAG_OPEN_STATE] = tag_open_state,
   [END_TAG_OPEN_STATE] = end_tag_open_state,
   [TAG_NAME_STATE] = tag_name_state,
+  [RCDATA_LT_STATE] = rcdata_lt_state,
+  [RCDATA_END_TAG_OPEN_STATE] = rcdata_end_tag_open_state,
+  [RCDATA_END_TAG_NAME_STATE] = rcdata_end_tag_name_state,
   /* ... */
   [BEFORE_ATTR_NAME_STATE] = before_attr_name_state,
   [ATTR_NAME_STATE] = attr_name_state,
-  /* ... */
+  [AFTER_ATTR_NAME_STATE] = after_attr_name_state,
+  [BEFORE_ATTR_VALUE_STATE] = before_attr_value_state,
+  [ATTR_VALUE_DOUBLE_QUOTED_STATE] = attr_value_double_quoted_state,
+  [ATTR_VALUE_SINGLE_QUOTED_STATE] = attr_value_single_quoted_state,
+  [ATTR_VALUE_UNQUOTED_STATE] = attr_value_unquoted_state,
+  [AFTER_ATTR_VALUE_QUOTED_STATE] = after_attr_value_quoted_state,
+  [SELF_CLOSING_START_TAG_STATE] = self_closing_start_tag_state,
+  [BOGUS_COMMENT_STATE] = bogus_comment_state,
   [MARKUP_DECL_OPEN_STATE] = markup_decl_open_state,
   /* ... */
   [DOCTYPE_STATE] = doctype_state,
@@ -296,12 +357,22 @@ static const tokenizer_state_handler k_tokenizer_states[NUM_STATES] = {
   /* ... */
 };
 
+static const treebuilder_mode_handler k_treebuilder_modes[NUM_MODES] = {
+  [INITIAL_MODE] = initial_mode,
+  /* ... */
+};
 
 static void
 tokenizer_error(struct tokenizer *tokenizer, const char *msg)
 {
   (void) tokenizer;
   printf("%s\n", msg);
+}
+
+static void
+treebuilder_error(struct treebuilder *treebuilder)
+{
+  (void) treebuilder;
 }
 
 static void
@@ -410,6 +481,26 @@ tokenizer_matchcase(struct tokenizer *tokenizer,
 }
 
 static void
+acknowledge_self_closing_fl(struct tag *tag)
+{
+  tag->ack_self_closing_fl = true;
+}
+
+static int
+appropriate_end_tag(struct tokenizer *tokenizer)
+{
+  return 1;
+}
+
+static inline int
+char_ref_in_attr(struct tokenizer *tokenizer)
+{
+  return (tokenizer->ret_state == ATTR_VALUE_DOUBLE_QUOTED_STATE
+       || tokenizer->ret_state == ATTR_VALUE_SINGLE_QUOTED_STATE
+       || tokenizer->ret_state == ATTR_VALUE_UNQUOTED_STATE);
+}
+
+static void
 create_doctype(struct tokenizer *tokenizer)
 {
   infra_string_unref(tokenizer->doctype.name);
@@ -426,19 +517,34 @@ static void
 destroy_tag(struct tag *tag)
 {
   infra_string_unref(tag->tagname);
+
+  INFRA_STACK_FOREACH(tag->attrs, i) {
+    struct attr *attr = tag->attrs->items[i];
+
+    infra_string_unref(attr->name);
+    infra_string_unref(attr->value);
+
+    free(attr);
+  }
+
+  infra_stack_free(tag->attrs);
+
   free(tag);
 }
 
 static void
 create_tag(struct tokenizer *tokenizer, enum token_type type)
 {
-  if (tokenizer->tag != NULL)
+  if (tokenizer->tag != NULL) {
     destroy_tag(tokenizer->tag);
+    tokenizer->tag = NULL;
+  }
 
   tokenizer->tag = malloc(sizeof (struct tag));
   memset(tokenizer->tag, 0, sizeof (*tokenizer->tag));
 
   tokenizer->tag->tagname = infra_string_create();
+  tokenizer->tag->attrs = infra_stack_create();
 
   tokenizer->tag_type = type;
 }
@@ -458,7 +564,14 @@ create_end_tag(struct tokenizer *tokenizer)
 static void
 create_attr(struct tokenizer *tokenizer)
 {
-  (void) tokenizer;
+  struct attr *attr = malloc(sizeof (*attr));
+  memset(attr, 0, sizeof (*attr));
+
+  attr->name = infra_string_create();
+  attr->value = infra_string_create();
+
+  infra_stack_push(tokenizer->tag->attrs, attr);
+  tokenizer->attr = attr;
 }
 
 static void
@@ -472,9 +585,11 @@ static void
 emit_token(struct tokenizer *tokenizer, union token_data *token_data,
            enum token_type token_type)
 {
-  (void) tokenizer;
-  (void) token_data;
-  (void) token_type;
+  struct treebuilder *treebuilder = tokenizer->treebuilder;
+  enum treebuilder_status rc = TREEBUILDER_STATUS_OK;
+
+  do { rc = tree_construction_dispatcher(treebuilder, token_data, token_type); }
+    while (rc == TREEBUILDER_STATUS_REPROCESS);
 }
 
 static void
@@ -520,13 +635,43 @@ emit_eof(struct tokenizer *tokenizer)
   return TOKENIZER_STATUS_EOF;
 }
 
-#include "html_tokenizer_states.c"
+
+static enum treebuilder_status
+tree_construction_dispatcher(struct treebuilder *treebuilder,
+                             union token_data *token_data,
+                             enum token_type token_type)
+{
+  /* XXX Foreign content!!! */
+  return k_treebuilder_modes[treebuilder->mode](treebuilder, token_data, token_type);
+}
 
 static void
-create_parser(struct tokenizer *tokenizer, struct treebuilder *treebuilder)
+insert_character(struct treebuilder *treebuilder, uint32_t c)
 {
-  (void) tokenizer;
   (void) treebuilder;
+  (void) c;
+}
+
+static void
+insert_comment(struct treebuilder *treebuilder, InfraString *comment,
+               struct insertion_location position)
+{
+  (void) treebuilder;
+  (void) comment;
+  (void) position;
+}
+
+static void
+create_parser(struct tokenizer *tokenizer, struct treebuilder *treebuilder,
+              struct dom_document *document, const char *input, size_t input_len)
+{
+  tokenizer->treebuilder = treebuilder;
+  treebuilder->tokenizer = tokenizer;
+
+  tokenizer->input.p   = input;
+  tokenizer->input.end = &input[input_len];
+
+  treebuilder->document = dom_strong_ref_object(document);
 }
 
 static void
@@ -538,9 +683,17 @@ free_parser(struct tokenizer *tokenizer, struct treebuilder *treebuilder)
   infra_string_unref(tokenizer->doctype.public_id);
   infra_string_unref(tokenizer->doctype.system_id);
 
-  if (tokenizer->tag)
+  infra_string_unref(tokenizer->comment);
+
+  if (tokenizer->tag != NULL)
     destroy_tag(tokenizer->tag);
+
+  dom_strong_unref_object(treebuilder->document);
 }
+
+#include "html_tokenizer_states.c"
+
+#include "html_treebuilder_modes.c"
 
 void
 html_parse(struct dom_document *document,
@@ -549,10 +702,9 @@ html_parse(struct dom_document *document,
   struct tokenizer tokenizer = { 0 };
   struct treebuilder treebuilder = { 0 };
 
-  create_parser(&tokenizer, &treebuilder);
-
-  tokenizer.input.p   = input;
-  tokenizer.input.end = &input[input_len];
+  create_parser(&tokenizer, &treebuilder,
+                document,
+                input, input_len);
 
   tokenizer.state = DATA_STATE;
 
