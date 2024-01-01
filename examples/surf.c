@@ -2,7 +2,7 @@
 
 #include <wfs/dom.h>
 #include <wfs/dom_core.h>
-#include <wfs/html_parse.h>
+#include <wfs/html.h>
 
 const char *myfile = "<!DOCTYPE html>\n<html lang='fr' yeet scott=free>TTTTTTTTTTT</html>";
 

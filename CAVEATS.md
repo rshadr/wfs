@@ -1,0 +1,4 @@
+- Uses half-finished C2X features
+- Cannot compile in C++ mode
+- Circular dependency: DOM Core <=> DOM HTML
+- Adoption agency algorithm uses node clones instead of the original parser tag

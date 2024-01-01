@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+
+<html>
+  <head>
+    <title>Customized built-in element test</title>
+    <script>
+      class PlasticButton extends HTMLButtonElement {
+        constructor() {
+          super();
+
+          this.addEventListener("click", function(event){
+            console.log("was clicked.");
+          });
+        }
+      }
+
+      customElements.define("plastic-button", PlasticButton, { extends: "button" });
+    </script>
+  </head>
+
+  <body>
+    <button is="plastic-button">Click me!</button>
+  </body>
+</html>

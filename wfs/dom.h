@@ -10,9 +10,11 @@
 typedef struct DOMInterface_s DOMInterface;
 
 typedef struct DOMHeader_s {
+  /* Aligns to 16-byte boundary on x64 */
+  /* Aligns to CPU word boundary for x86 and x64 */
   const DOMInterface *interface;
-  _Atomic int_least32_t strong_refcnt;
-  _Atomic int_least32_t weak_refcnt;
+  int_least32_t strong_refcnt;
+  int_least32_t weak_refcnt;
 } DOMHeader;
 
 typedef struct DOMObject_s {
@@ -53,6 +55,8 @@ dom_alloc_object(const DOMInterface *interface)
 
   return obj;
 }
+
+#define dom_new_object(type) (dom_alloc_object(DOM_INTERFACE(type)))
 
 static inline void
 dom_free_object(DOMObject *obj)

@@ -1,3 +1,5 @@
 *.o
 *.a
 examples/surf
+*.core
+*.core.*

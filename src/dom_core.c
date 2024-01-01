@@ -52,6 +52,42 @@ DOM_DEFINE_INTERFACE(document_type) {
 };
 
 static void
+element_finalizer(DOMObject *obj)
+{
+  struct dom_element *elem = (DOMAny *) obj;
+
+  if (elem->attrs != NULL)
+  {
+    INFRA_STACK_FOREACH(elem->attrs, i)
+      dom_strong_unref_object(elem->attrs->items[i]);
+  }
+}
+
+DOM_DEFINE_INTERFACE(element) {
+  .name = "Element",
+  .parent_interface = DOM_INTERFACE(node),
+  .impl_size = sizeof (struct dom_element),
+  .finalizer = element_finalizer,
+};
+
+static void
+attr_finalizer(DOMObject *obj)
+{
+  struct dom_attr *attr = (DOMAny *) obj;
+
+  dom_weak_unref_object(attr->element);
+  infra_string_unref(attr->local_name);
+  infra_string_unref(attr->value);
+}
+
+DOM_DEFINE_INTERFACE(attr) {
+  .name = "Attr",
+  .parent_interface = DOM_INTERFACE(node),
+  .impl_size = sizeof (struct dom_attr),
+  .finalizer = attr_finalizer,
+};
+
+static void
 character_data_finalizer(DOMObject *obj)
 {
   struct dom_character_data *cd = (DOMAny *) obj;
@@ -116,4 +152,44 @@ dom_append_node(struct dom_node *parent, struct dom_node *node)
 {
   dom_pre_insert_node(parent, node, NULL);
 }
+
+/* XXX Add uninterned version */
+struct dom_element *
+dom_create_element_interned(struct dom_document *document, uint16_t local_name,
+                            enum InfraNamespace namespace,
+                            const void *prefix, const void *is,
+                            bool sync_custom_elements)
+{
+  struct dom_element *result = NULL;
+
+  (void) prefix;
+  (void) is;
+  (void) sync_custom_elements;
+
+  /* XXX custom elements */
+  /* XXX non-HTML elements */
+
+  /*
+   * XXX: currently, this section only involves the third case in the spec,
+   * where there is no custom element definition for the tag name.
+   */
+
+  /* otherwise: */ {
+    /* XXX: CIRCULAR DEPENDENCY */
+    extern const DOMInterface *k_html_element_interfaces[];
+
+    const DOMInterface *interface = k_html_element_interfaces[local_name];
+
+    result = dom_alloc_object( interface );
+
+    result->namespace  = namespace;
+    result->local_name = local_name;
+
+    ((struct dom_node *) result)->node_document = dom_weak_ref_object(document);
+    ((struct dom_node *) result)->children = infra_stack_create();
+  }
+
+  return NULL;
+}
+
 /* END ALGORITHMS */

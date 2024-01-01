@@ -22,10 +22,12 @@
 
 #include <wfs/dom.h>
 #include <wfs/dom_core.h>
-#include <wfs/html_parse.h>
+#include <wfs/html_tags.h>
+#include <wfs/html.h>
 
 #include <wfs/infra_string.h>
 #include <wfs/infra_stack.h>
+#include <wfs/infra_namespace.h>
 
 #include "unicode.h"
 
@@ -56,6 +58,11 @@ struct tag {
   bool ack_self_closing_fl;
 };
 
+enum {
+  FOREIGN_TAG_MATH = NUM_HTML_TAG,
+  FOREIGN_TAG_SVG,
+};
+
 struct attr {
   InfraString *name;
   InfraString *value;
@@ -65,10 +72,10 @@ struct doctype {
   InfraString *name;
   InfraString *public_id;
   InfraString *system_id;
-  bool name_missing;
-  bool system_id_missing;
-  bool public_id_missing;
-  bool force_quirks;
+  bool name_missing : 1;
+  bool system_id_missing : 1;
+  bool public_id_missing : 1;
+  bool force_quirks : 1;
 };
 
 union token_data {
@@ -229,19 +236,28 @@ enum treebuilder_mode {
 struct treebuilder {
   struct tokenizer *tokenizer;
 
+  struct dom_element *context; // strong reference
   struct dom_document *document; // strong reference
+
+  struct dom_html_head_element *head; // strong reference
+  struct dom_html_form_element *form; // strong reference
+
+  InfraStack *open_elements; // -> strong references
 
   int script_nesting;
 
   enum treebuilder_mode mode;
   enum treebuilder_mode original_mode;
+
+  bool scripting;
+  bool frameset_ok;
 };
 
 enum treebuilder_status {
   TREEBUILDER_STATUS_REPROCESS = 0,
   TREEBUILDER_STATUS_OK,
   TREEBUILDER_STATUS_IGNORE,
-  TREEBUILDER_STATUS_EOF,
+  TREEBUILDER_STATUS_STOP,
 };
 
 typedef enum treebuilder_status (*treebuilder_mode_handler) (struct treebuilder *treebuilder,
@@ -258,6 +274,11 @@ static int tokenizer_cmp_consume(struct tokenizer *tokenizer,
                                   const char *s, size_t slen);
 static int tokenizer_match(struct tokenizer *tokenizer, const char *s, size_t slen);
 static int tokenizer_matchcase(struct tokenizer *tokenizer, const char *s, size_t slen);
+
+static void push_open_element(struct treebuilder *treebuilder, struct dom_element *elem);
+static const struct dom_element *pop_open_element(struct treebuilder *treebuilder);
+static inline struct dom_element *current_node(struct treebuilder *treebuilder);
+static inline struct dom_element *adjusted_current_node(struct treebuilder *treebuilder);
 
 static void acknowledge_self_closing_fl(struct tag *tag);
 static int appropriate_end_tag(struct tokenizer *tokenizer);
@@ -284,6 +305,23 @@ static enum tokenizer_status emit_eof(struct tokenizer *tokenizer);
 static enum treebuilder_status tree_construction_dispatcher(struct treebuilder *treebuilder,
                                                             union token_data *token_data,
                                                             enum token_type token_type);
+/* XXX MathML, SVG */
+
+static struct insertion_location appropriate_place(struct treebuilder *treebuilder,
+                                                   struct dom_node *override_target);
+static struct dom_element *create_element_for_token(struct treebuilder *treebuilder,
+                                                    struct tag *tag,
+                                                    enum InfraNamespace namespace,
+                                                    struct dom_node *intended_parent);
+static void insert_element_at_adj_location(struct treebuilder *treebuilder,
+                                                          struct dom_element *element);
+static struct dom_element *insert_foreign_element(struct treebuilder *treebuilder,
+                                                  struct tag *tag,
+                                                  enum InfraNamespace namespace,
+                                                  bool only_add_to_element_stack);
+static struct dom_html_element *insert_html_element(struct treebuilder *treebuilder,
+                                                    struct tag *tag);
+
 static void insert_character(struct treebuilder *treebuilder, uint32_t c);
 static void insert_comment(struct treebuilder *treebuilder, InfraString *comment,
                            struct insertion_location position);
@@ -320,11 +358,27 @@ static enum tokenizer_status doctype_name_state(struct tokenizer *tokenizer, int
 static enum treebuilder_status initial_mode(struct treebuilder *treebuilder,
                                             union token_data *token_data,
                                             enum token_type token_type);
-#if 0
 static enum treebuilder_status before_html_mode(struct treebuilder *treebuilder,
                                                 union token_data *token_data,
                                                 enum token_type token_type);
-#endif
+static enum treebuilder_status before_head_mode(struct treebuilder *treebuilder,
+                                                union token_data *token_data,
+                                                enum token_type token_type);
+static enum treebuilder_status in_head_mode(struct treebuilder *treebuilder,
+                                            union token_data *token_data,
+                                            enum token_type token_type);
+static enum treebuilder_status after_head_mode(struct treebuilder *treebuilder,
+                                               union token_data *token_data,
+                                               enum token_type token_type);
+static enum treebuilder_status in_body_mode(struct treebuilder *treebuilder,
+                                            union token_data *token_data,
+                                            enum token_type token_type);
+static enum treebuilder_status after_body_mode(struct treebuilder *treebuilder,
+                                               union token_data *token_data,
+                                               enum token_type token_type);
+static enum treebuilder_status after_after_body_mode(struct treebuilder *treebuilder,
+                                                     union token_data *token_data,
+                                                     enum token_type token_type);
 
 /* globals */
 static const tokenizer_state_handler k_tokenizer_states[NUM_STATES] = {
@@ -358,7 +412,16 @@ static const tokenizer_state_handler k_tokenizer_states[NUM_STATES] = {
 };
 
 static const treebuilder_mode_handler k_treebuilder_modes[NUM_MODES] = {
-  [INITIAL_MODE] = initial_mode,
+  [INITIAL_MODE]          = initial_mode,
+  [BEFORE_HTML_MODE]      = before_html_mode,
+  [BEFORE_HEAD_MODE]      = before_head_mode,
+  [IN_HEAD_MODE]          = in_head_mode,
+  /* ... */
+  [AFTER_HEAD_MODE]       = after_head_mode,
+  [IN_BODY_MODE]          = in_body_mode,
+  /* ... */
+  [AFTER_BODY_MODE]       = after_body_mode,
+  [AFTER_AFTER_BODY_MODE] = after_after_body_mode,
   /* ... */
 };
 
@@ -481,6 +544,39 @@ tokenizer_matchcase(struct tokenizer *tokenizer,
 }
 
 static void
+push_open_element(struct treebuilder *treebuilder, struct dom_element *elem)
+{
+  infra_stack_push(treebuilder->open_elements,
+    dom_strong_ref_object(elem));
+}
+
+static const struct dom_element *
+pop_open_element(struct treebuilder *treebuilder)
+{
+  struct dom_element *popped = infra_stack_pop(treebuilder->open_elements);
+
+  dom_strong_unref_object(popped);
+
+  return popped;
+}
+
+static inline struct dom_element *
+current_node(struct treebuilder *treebuilder)
+{
+  return infra_stack_peek(treebuilder->open_elements);
+}
+
+static inline struct dom_element *
+adjusted_current_node(struct treebuilder *treebuilder)
+{
+  if (treebuilder->context != NULL
+   && treebuilder->open_elements->size == 1)
+    return treebuilder->context;
+
+  return current_node(treebuilder);
+}
+
+static void
 acknowledge_self_closing_fl(struct tag *tag)
 {
   tag->ack_self_closing_fl = true;
@@ -595,18 +691,29 @@ emit_token(struct tokenizer *tokenizer, union token_data *token_data,
 static void
 emit_tag(struct tokenizer *tokenizer)
 {
-  emit_token(tokenizer, (union token_data *) tokenizer->tag, tokenizer->tag_type);
-}
-
-static inline enum token_type
-char_to_type(uint32_t c)
-{
-  switch (c) {
-    case '\t': case '\n': case '\f': case ' ':
-      return TOKEN_WHITESPACE;
-    default:
-      return TOKEN_CHARACTER;
+  /* XXX Support other namespaces */
+  for (uint16_t i = HTML_TAG_HTML; i < NUM_HTML_TAG; i++)
+  {
+    if (!strcmp(k_html_tag_names[i], tokenizer->tag->tagname->data))
+    {
+      tokenizer->tag->localname = i;
+      break;
+    }
   }
+
+  if (tokenizer->tag->localname == 0)
+  {
+    if (!strcmp("math", tokenizer->tag->tagname->data)) {
+      tokenizer->tag->localname = FOREIGN_TAG_MATH;
+    } else if (!strcmp("svg", tokenizer->tag->tagname->data)) {
+      tokenizer->tag->localname = FOREIGN_TAG_SVG;
+    } else if (strcmp("image", tokenizer->tag->tagname->data) == 0
+            && tokenizer->treebuilder->mode == IN_BODY_MODE) {
+      tokenizer->tag->localname = HTML_TAG_IMG;
+    }
+  }
+
+  emit_token(tokenizer, (union token_data *) tokenizer->tag, tokenizer->tag_type);
 }
 
 static void
@@ -619,6 +726,17 @@ static void
 emit_comment(struct tokenizer *tokenizer)
 {
   emit_token(tokenizer, (union token_data *) &tokenizer->comment, TOKEN_COMMENT);
+}
+
+static inline enum token_type
+char_to_type(uint32_t c)
+{
+  switch (c) {
+    case '\t': case '\n': case '\f': case ' ':
+      return TOKEN_WHITESPACE;
+    default:
+      return TOKEN_CHARACTER;
+  }
 }
 
 static void
@@ -643,6 +761,67 @@ tree_construction_dispatcher(struct treebuilder *treebuilder,
 {
   /* XXX Foreign content!!! */
   return k_treebuilder_modes[treebuilder->mode](treebuilder, token_data, token_type);
+}
+
+static struct insertion_location
+appropriate_place(struct treebuilder *treebuilder, struct dom_node *override_target)
+{
+  (void) treebuilder;
+  (void) override_target;
+
+  return (struct insertion_location){0};
+}
+
+static struct dom_element *
+create_element_for_token(struct treebuilder *treebuilder, struct tag *tag,
+                         enum InfraNamespace namespace,
+                         struct dom_node *intended_parent)
+{
+  dom_strong_ref_object(intended_parent);
+
+  struct dom_document *document =
+    dom_strong_ref_object(intended_parent->node_document);
+  uint16_t local_name = tag->localname;
+  struct dom_element *element = NULL;
+  /*
+   * XXX: uninterned local names (mostly valid custom element names)
+   * XXX: stub for custom elements; create dummy definition and generate
+   * internal element index
+   */
+
+  bool exec_script = false;
+
+  element = dom_create_element_interned(document, local_name, namespace,
+    NULL, NULL, exec_script);
+
+  INFRA_STACK_FOREACH(tag->attrs, i) {
+    struct attr *on_token = tag->attrs->items[i];
+
+    // if
+  }
+
+  dom_strong_unref_object(document);
+  dom_strong_unref_object(intended_parent);
+
+  return element;
+}
+
+static struct dom_element *
+insert_foreign_element(struct treebuilder *treebuilder,
+                       struct tag *tag,
+                       enum InfraNamespace namespace,
+                       bool only_add_to_element_stack)
+{
+  /* XXX */
+  return NULL;
+}
+
+static struct dom_html_element *
+insert_html_element(struct treebuilder *treebuilder,
+                    struct tag *tag)
+{
+  return (struct dom_html_element *)
+    insert_foreign_element(treebuilder, tag, INFRA_NAMESPACE_HTML, false);
 }
 
 static void
@@ -687,6 +866,13 @@ free_parser(struct tokenizer *tokenizer, struct treebuilder *treebuilder)
 
   if (tokenizer->tag != NULL)
     destroy_tag(tokenizer->tag);
+
+
+  while (treebuilder->open_elements->size > 0)
+    pop_open_element(treebuilder);
+
+  dom_strong_unref_object(treebuilder->head);
+  dom_strong_unref_object(treebuilder->form);
 
   dom_strong_unref_object(treebuilder->document);
 }

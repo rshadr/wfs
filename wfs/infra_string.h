@@ -6,7 +6,7 @@
 
 typedef struct InfraString_s {
   char *data;
-  _Atomic int_least32_t refcnt;
+  int_least32_t refcnt;
   uint32_t size;
   uint32_t cap;
 } InfraString;
