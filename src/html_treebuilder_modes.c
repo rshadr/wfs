@@ -1,3 +1,5 @@
+#include <inttypes.h>
+
 static enum treebuilder_status
 initial_mode(struct treebuilder *treebuilder,
              union token_data *token_data,
@@ -24,7 +26,7 @@ initial_mode(struct treebuilder *treebuilder,
       treebuilder_error(treebuilder);
 
     struct doctype *token = &token_data->doctype;
-    struct dom_document_type *doctype = dom_alloc_object( DOM_INTERFACE(document_type) );
+    struct dom_document_type *doctype = DOM_NEW_OBJECT( document_type );
 
     dom_append_node((struct dom_node *) treebuilder->document, (struct dom_node *) doctype);
 
@@ -48,7 +50,6 @@ before_html_mode(struct treebuilder *treebuilder,
                  union token_data *token_data,
                  enum token_type token_type)
 {
-  printf("Ah?\n");
   if (token_type == TOKEN_DOCTYPE)
   {
     treebuilder_error(treebuilder);
@@ -72,14 +73,19 @@ before_html_mode(struct treebuilder *treebuilder,
     switch (token_data->tag.localname)
     {
       case HTML_TAG_HTML: {
-        /* XXX create element */
-        printf("got it\n");
+        struct dom_html_element *html =
+          (struct dom_html_element *) create_element_for_token(treebuilder,
+                                       &token_data->tag, INFRA_NAMESPACE_HTML,
+                                       (struct dom_node *) treebuilder->document);
+        dom_append_node((struct dom_node *) treebuilder->document,
+         (struct dom_node *) html);
+        push_open_element(treebuilder, (struct dom_element *) html);
+
         treebuilder->mode = BEFORE_HEAD_MODE;
         return TREEBUILDER_STATUS_OK;
       }
 
       default:
-        printf("Ceh\n");
         goto anything_else;
     }
   }
@@ -99,7 +105,14 @@ before_html_mode(struct treebuilder *treebuilder,
   }
 
 anything_else: {
-    /* XXX create element */
+    struct dom_html_html_element *html = (struct dom_html_html_element *)
+     dom_create_element_interned(treebuilder->document, HTML_TAG_HTML,
+      INFRA_NAMESPACE_HTML, NULL, NULL, false);
+
+    dom_append_node((struct dom_node *) treebuilder->document,
+     (struct dom_node *) html);
+    push_open_element(treebuilder, (struct dom_element *) html);
+
     treebuilder->mode = BEFORE_HEAD_MODE;
     return TREEBUILDER_STATUS_REPROCESS;
   }
@@ -132,12 +145,13 @@ before_head_mode(struct treebuilder *treebuilder,
     switch (token_data->tag.localname)
     {
       case HTML_TAG_HTML:
-        /* XXX process in body */
-        return TREEBUILDER_STATUS_OK;
+        return in_body_mode(treebuilder, token_data, token_type);
 
       case HTML_TAG_HEAD: {
-        struct dom_html_head_element *head = NULL;
-        /* XXX insert, head ptr */
+        struct dom_html_head_element *head = (struct dom_html_head_element *)
+          insert_html_element(treebuilder, &token_data->tag);
+        treebuilder->head = dom_strong_ref_object(head);
+
         treebuilder->mode = IN_HEAD_MODE;
         return TREEBUILDER_STATUS_OK;
       }
@@ -202,17 +216,23 @@ in_head_mode(struct treebuilder *treebuilder,
     switch (token_data->tag.localname)
     {
       case HTML_TAG_HTML:
-        /* XXX in body mode */
-        return TREEBUILDER_STATUS_OK;
+        return in_body_mode(treebuilder, token_data, token_type);
 
       case HTML_TAG_BASE: case HTML_TAG_BASEFONT: case HTML_TAG_BGSOUND:
       case HTML_TAG_LINK:
-        /* XXX insert and pop */
+        insert_html_element(treebuilder, &token_data->tag);
+        pop_open_element(treebuilder);
+
+        if (token_data->tag.self_closing_fl)
+          acknowledge_self_closing_fl(&token_data->tag);
+
         return TREEBUILDER_STATUS_OK;
 
 
       case HTML_TAG_META:
-        /* XXX */
+        insert_html_element(treebuilder, &token_data->tag);
+        pop_open_element(treebuilder);
+        /* XXX more crap */
         return TREEBUILDER_STATUS_OK;
 
       case HTML_TAG_TITLE:
@@ -251,7 +271,24 @@ in_head_mode(struct treebuilder *treebuilder,
 
   if (token_type == TOKEN_END_TAG)
   {
-    /* XXX */
+    switch (token_data->tag.localname)
+    {
+      case HTML_TAG_HEAD:
+        pop_open_element(treebuilder);
+        treebuilder->mode = AFTER_HEAD_MODE;
+        return TREEBUILDER_STATUS_OK;
+
+      case HTML_TAG_BODY: case HTML_TAG_HTML: case HTML_TAG_BR:
+        goto anything_else;
+
+      case HTML_TAG_TEMPLATE:
+        /* XXX */
+        return TREEBUILDER_STATUS_OK;
+
+      default:
+        treebuilder_error(treebuilder);
+        return TREEBUILDER_STATUS_IGNORE;
+    }
   }
 
 anything_else: {
@@ -297,7 +334,6 @@ after_head_mode(struct treebuilder *treebuilder,
 anything_else: {
     insert_html_element(treebuilder, &(struct tag){.localname = HTML_TAG_BODY});
     treebuilder->mode = IN_BODY_MODE;
-    printf("a\n");
     return TREEBUILDER_STATUS_OK;
   }
 

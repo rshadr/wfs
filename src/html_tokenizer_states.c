@@ -576,8 +576,223 @@ markup_decl_open_state(struct tokenizer *tokenizer, int32_t c)
 
 #undef S
 
+static enum tokenizer_status
+comment_start_state(struct tokenizer *tokenizer, int32_t c)
+{
+  switch (c) {
+    case '-':
+      tokenizer->state = COMMENT_START_DASH_STATE;
+      return TOKENIZER_STATUS_OK;
 
-/* ... */
+    case '>':
+      tokenizer_error(tokenizer, "abrupt-closing-of-empty-comment");
+      tokenizer->state = DATA_STATE;
+      emit_comment(tokenizer);
+      return TOKENIZER_STATUS_OK;
+
+    default:
+      tokenizer->state = COMMENT_STATE;
+      return TOKENIZER_STATUS_RECONSUME;
+  }
+}
+
+static enum tokenizer_status
+comment_start_dash_state(struct tokenizer *tokenizer, int32_t c)
+{
+  switch (c) {
+    case '-':
+      tokenizer->state = COMMENT_END_STATE;
+      return TOKENIZER_STATUS_OK;
+
+    case '>':
+      tokenizer_error(tokenizer, "abrupt-closing-of-empty-comment");
+      tokenizer->state = DATA_STATE;
+      emit_comment(tokenizer);
+      return TOKENIZER_STATUS_OK;
+
+    case -1:
+      tokenizer_error(tokenizer, "eof-in-comment");
+      emit_comment(tokenizer);
+      return emit_eof(tokenizer);
+
+    default:
+      infra_string_put_char(tokenizer->comment, '-');
+      tokenizer->state = COMMENT_STATE;
+      return TOKENIZER_STATUS_RECONSUME;
+  }
+}
+
+static enum tokenizer_status
+comment_state(struct tokenizer *tokenizer, int32_t c)
+{
+  switch (c) {
+    case '<':
+      infra_string_put_char(tokenizer->comment, c);
+      tokenizer->state = COMMENT_LT_STATE;
+      return TOKENIZER_STATUS_OK;
+
+    case '-':
+      tokenizer->state = COMMENT_END_DASH_STATE;
+      return TOKENIZER_STATUS_OK;
+
+    case '\0':
+      tokenizer_error(tokenizer, "unexpected-null-character");
+      infra_string_put_codepoint(tokenizer->comment, 0xFFFD);
+      return TOKENIZER_STATUS_OK;
+
+    case -1:
+      tokenizer_error(tokenizer, "eof-in-comment");
+      emit_comment(tokenizer);
+      return emit_eof(tokenizer);
+
+    default:
+      infra_string_put_codepoint(tokenizer->comment, c);
+      return TOKENIZER_STATUS_OK;
+  }
+}
+
+static enum tokenizer_status
+comment_lt_state(struct tokenizer *tokenizer, int32_t c)
+{
+  switch (c) {
+    case '!':
+      infra_string_put_char(tokenizer->comment, c);
+      tokenizer->state = COMMENT_LT_BANG_STATE;
+      return TOKENIZER_STATUS_OK;
+
+    case '<':
+      infra_string_put_codepoint(tokenizer->comment, c);
+      return TOKENIZER_STATUS_OK;
+
+    default:
+      tokenizer->state = COMMENT_STATE;
+      return TOKENIZER_STATUS_RECONSUME;
+  }
+}
+
+static enum tokenizer_status
+comment_lt_bang_state(struct tokenizer *tokenizer, int32_t c)
+{
+  switch (c) {
+    case '-':
+      tokenizer->state = COMMENT_LT_BANG_DASH_STATE;
+      return TOKENIZER_STATUS_OK;
+
+    default:
+      tokenizer->state = COMMENT_STATE;
+      return TOKENIZER_STATUS_RECONSUME;
+  }
+}
+
+static enum tokenizer_status
+comment_lt_bang_dash_state(struct tokenizer *tokenizer, int32_t c)
+{
+  switch (c) {
+    case '-':
+      tokenizer->state = COMMENT_LT_BANG_DASH_DASH_STATE;
+      return TOKENIZER_STATUS_OK;
+
+    default:
+      tokenizer->state = COMMENT_END_DASH_STATE;
+      return TOKENIZER_STATUS_RECONSUME;
+  }
+}
+
+static enum tokenizer_status
+comment_lt_bang_dash_dash_state(struct tokenizer *tokenizer, int32_t c)
+{
+  switch (c) {
+    case '>': case -1:
+      tokenizer->state = COMMENT_END_STATE;
+      return TOKENIZER_STATUS_RECONSUME;
+
+    default:
+      tokenizer_error(tokenizer, "nested-comment");
+      tokenizer->state = COMMENT_END_STATE;
+      return TOKENIZER_STATUS_RECONSUME;
+  }
+}
+
+static enum tokenizer_status
+comment_end_dash_state(struct tokenizer *tokenizer, int32_t c)
+{
+  switch (c) {
+    case '-':
+      tokenizer->state = COMMENT_END_STATE;
+      return TOKENIZER_STATUS_OK;
+
+    case -1:
+      tokenizer_error(tokenizer, "eof-in-comment");
+      emit_comment(tokenizer);
+      return emit_eof(tokenizer);
+
+    default:
+      infra_string_put_char(tokenizer->comment, '-');
+      tokenizer->state = COMMENT_STATE;
+      return TOKENIZER_STATUS_RECONSUME;
+  }
+}
+
+static enum tokenizer_status
+comment_end_state(struct tokenizer *tokenizer, int32_t c)
+{
+  switch (c) {
+    case '>':
+      tokenizer->state = DATA_STATE;
+      emit_comment(tokenizer);
+      return TOKENIZER_STATUS_OK;
+
+    case '!':
+      tokenizer->state = COMMENT_END_BANG_STATE;
+      return TOKENIZER_STATUS_OK;
+
+    case '-':
+      infra_string_put_char(tokenizer->comment, '-');
+      return TOKENIZER_STATUS_OK;
+
+    case -1:
+      tokenizer_error(tokenizer, "eof-in-comment");
+      emit_comment(tokenizer);
+      return emit_eof(tokenizer);
+
+    default:
+      infra_string_put_char(tokenizer->comment, '-');
+      infra_string_put_char(tokenizer->comment, '-');
+      tokenizer->state = COMMENT_STATE;
+      return TOKENIZER_STATUS_RECONSUME;
+  }
+}
+
+static enum tokenizer_status
+comment_end_bang_state(struct tokenizer *tokenizer, int32_t c)
+{
+  switch (c) {
+    case '-':
+      infra_string_put_char(tokenizer->comment, '-');
+      infra_string_put_char(tokenizer->comment, '-');
+      infra_string_put_char(tokenizer->comment, '!');
+      tokenizer->state = COMMENT_END_DASH_STATE;
+      return TOKENIZER_STATUS_OK;
+
+    case '>':
+      tokenizer_error(tokenizer, "incorrectly-closed-comment");
+      tokenizer->state = DATA_STATE;
+      emit_comment(tokenizer);
+      return TOKENIZER_STATUS_OK;
+
+    case -1:
+      tokenizer_error(tokenizer, "eof-in-comment");
+      emit_comment(tokenizer);
+      return emit_eof(tokenizer);
+
+    default:
+      infra_string_put_char(tokenizer->comment, '-');
+      infra_string_put_char(tokenizer->comment, '-');
+      infra_string_put_char(tokenizer->comment, '!');
+      tokenizer->state = COMMENT_STATE;
+      return TOKENIZER_STATUS_RECONSUME;
+  }
+}
 
 static enum tokenizer_status
 doctype_state(struct tokenizer *tokenizer, int32_t c)

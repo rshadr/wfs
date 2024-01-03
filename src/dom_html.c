@@ -16,7 +16,7 @@ DOM_DEFINE_INTERFACE(html_unknown_element) {
 /* 4.1 The document element */
 DOM_DEFINE_INTERFACE(html_html_element) {
   .name = "HTMLHtmlElement",
-  .parent_interface = DOM_INTERFACE(html_html_element),
+  .parent_interface = DOM_INTERFACE(html_element),
   .impl_size = sizeof (struct dom_html_html_element),
 };
 

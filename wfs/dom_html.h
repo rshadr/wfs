@@ -163,6 +163,8 @@ struct dom_html_script_element {
 DOM_DECLARE_INTERFACE(html_template_element);
 struct dom_html_template_element {
   struct dom_html_element _base;
+
+  struct dom_document_fragment *template_contents; // strong reference
 };
 
 DOM_DECLARE_INTERFACE(custom_element_registry);

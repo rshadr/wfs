@@ -3,3 +3,4 @@
 examples/surf
 *.core
 *.core.*
+wfs/infra_buffer.h

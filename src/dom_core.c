@@ -1,4 +1,5 @@
 #include <wfs/dom_core.h>
+#include <stdlib.h>
 
 /* START INTERFACES */
 
@@ -18,6 +19,8 @@ node_finalizer(DOMObject *obj)
   if (node->children != NULL) {
     INFRA_STACK_FOREACH(node->children, i)
       dom_strong_unref_object(node->children->items[i]);
+
+    infra_stack_free(node->children);
   }
 }
 
@@ -46,9 +49,24 @@ document_type_finalizer(DOMObject *obj)
 
 DOM_DEFINE_INTERFACE(document_type) {
   .name = "DocumentType",
-  .parent_interface = DOM_INTERFACE(document_type),
+  .parent_interface = DOM_INTERFACE(node),
   .impl_size = sizeof (struct dom_document_type),
   .finalizer = document_type_finalizer,
+};
+
+static void
+document_fragment_finalizer(DOMObject *obj)
+{
+  struct dom_document_fragment *fragment = (DOMAny *) obj;
+
+  dom_strong_unref_object(fragment->host);
+}
+
+DOM_DEFINE_INTERFACE(document_fragment) {
+  .name = "DocumentFragment",
+  .parent_interface = DOM_INTERFACE(node),
+  .impl_size = sizeof (struct dom_document_fragment),
+  .finalizer = document_fragment_finalizer,
 };
 
 static void
@@ -139,10 +157,12 @@ dom_insert_node(struct dom_node *parent,
 
   if (child == NULL) {
     node->parent = dom_weak_ref_object(parent);
-    infra_stack_push(parent->children, dom_strong_ref_object(node));
+    infra_stack_push(parent->children,
+      dom_strong_ref_object(node));
     return;
   }
 
+  abort();
   /* ... */
   /* Yikes! */
 }
@@ -189,7 +209,7 @@ dom_create_element_interned(struct dom_document *document, uint16_t local_name,
     ((struct dom_node *) result)->children = infra_stack_create();
   }
 
-  return NULL;
+  return result;
 }
 
 /* END ALGORITHMS */

@@ -43,6 +43,13 @@ struct dom_document_type {
   InfraString *system_id;
 };
 
+DOM_DECLARE_INTERFACE(document_fragment);
+struct dom_document_fragment {
+  struct dom_node _base;
+
+  struct dom_element *host; // strong reference
+};
+
 DOM_DECLARE_INTERFACE(element);
 struct dom_element {
   struct dom_node _base;

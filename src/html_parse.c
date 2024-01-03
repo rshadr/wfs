@@ -251,6 +251,7 @@ struct treebuilder {
 
   bool scripting;
   bool frameset_ok;
+  bool foster_parenting;
 };
 
 enum treebuilder_status {
@@ -323,8 +324,13 @@ static struct dom_html_element *insert_html_element(struct treebuilder *treebuil
                                                     struct tag *tag);
 
 static void insert_character(struct treebuilder *treebuilder, uint32_t c);
-static void insert_comment(struct treebuilder *treebuilder, InfraString *comment,
+static void insert_comment(struct treebuilder *treebuilder, InfraString *data,
                            struct insertion_location position);
+
+static enum treebuilder_status generic_raw_text_parse(struct treebuilder *treebuilder,
+                                                      struct tag *tag);
+static enum treebuilder_status generic_rcdata_parse(struct treebuilder *treebuilder,
+                                                    struct tag *tag);
 
 static void create_parser(struct tokenizer *tokenizer, struct treebuilder *treebuilder,
                           struct dom_document *document, const char *input,
@@ -351,6 +357,16 @@ static enum tokenizer_status after_attr_value_quoted_state(struct tokenizer *tok
 static enum tokenizer_status self_closing_start_tag_state(struct tokenizer *tokenizer, int32_t c);
 static enum tokenizer_status bogus_comment_state(struct tokenizer *tokenizer, int32_t c);
 static enum tokenizer_status markup_decl_open_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status comment_start_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status comment_start_dash_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status comment_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status comment_lt_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status comment_lt_bang_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status comment_lt_bang_dash_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status comment_lt_bang_dash_dash_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status comment_end_dash_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status comment_end_state(struct tokenizer *tokenizer, int32_t c);
+static enum tokenizer_status comment_end_bang_state(struct tokenizer *tokenizer, int32_t c);
 static enum tokenizer_status doctype_state(struct tokenizer *tokenizer, int32_t c);
 static enum tokenizer_status before_doctype_name_state(struct tokenizer *tokenizer, int32_t c);
 static enum tokenizer_status doctype_name_state(struct tokenizer *tokenizer, int32_t c);
@@ -404,7 +420,16 @@ static const tokenizer_state_handler k_tokenizer_states[NUM_STATES] = {
   [SELF_CLOSING_START_TAG_STATE] = self_closing_start_tag_state,
   [BOGUS_COMMENT_STATE] = bogus_comment_state,
   [MARKUP_DECL_OPEN_STATE] = markup_decl_open_state,
-  /* ... */
+  [COMMENT_START_STATE] = comment_start_state,
+  [COMMENT_START_DASH_STATE] = comment_start_dash_state,
+  [COMMENT_STATE] = comment_state,
+  [COMMENT_LT_STATE] = comment_lt_state,
+  [COMMENT_LT_BANG_STATE] = comment_lt_bang_state,
+  [COMMENT_LT_BANG_DASH_STATE] = comment_lt_bang_dash_state,
+  [COMMENT_LT_BANG_DASH_DASH_STATE] = comment_lt_bang_dash_dash_state,
+  [COMMENT_END_DASH_STATE] = comment_end_dash_state,
+  [COMMENT_END_STATE] = comment_end_state,
+  [COMMENT_END_BANG_STATE] = comment_end_bang_state,
   [DOCTYPE_STATE] = doctype_state,
   [BEFORE_DOCTYPE_NAME_STATE] = before_doctype_name_state,
   [DOCTYPE_NAME_STATE] = doctype_name_state,
@@ -604,7 +629,8 @@ create_doctype(struct tokenizer *tokenizer)
   infra_string_unref(tokenizer->doctype.system_id);
 
   memset(&tokenizer->doctype, 0, sizeof (tokenizer->doctype));
-  tokenizer->doctype.name = infra_string_create();
+
+  tokenizer->doctype.name      = infra_string_create();
   tokenizer->doctype.public_id = infra_string_create();
   tokenizer->doctype.system_id = infra_string_create();
 }
@@ -766,10 +792,78 @@ tree_construction_dispatcher(struct treebuilder *treebuilder,
 static struct insertion_location
 appropriate_place(struct treebuilder *treebuilder, struct dom_node *override_target)
 {
-  (void) treebuilder;
-  (void) override_target;
+  struct insertion_location location = { 0 };
+  struct dom_node *target = NULL;
+  struct dom_element *elem = (struct dom_element *) target;
 
-  return (struct insertion_location){0};
+  target = override_target != NULL
+         ? override_target
+         : (struct dom_node *) current_node(treebuilder);
+
+  if (treebuilder->foster_parenting
+   && DOM_IMPLEMENTS(target, html_element)
+   && (elem->namespace == INFRA_NAMESPACE_HTML)
+   && (elem->local_name == HTML_TAG_TABLE
+    || elem->local_name == HTML_TAG_TBODY
+    || elem->local_name == HTML_TAG_TFOOT
+    || elem->local_name == HTML_TAG_THEAD)) {
+    struct dom_html_template_element *template = NULL;
+    struct dom_html_table_element *table = NULL;
+    int template_ind = -1;
+    int table_ind = -1;
+
+    INFRA_STACK_FOREACH(treebuilder->open_elements, i) {
+      struct dom_element *elem = treebuilder->open_elements->items[i];
+
+      if (elem->namespace == INFRA_NAMESPACE_HTML
+       && elem->local_name == HTML_TAG_TEMPLATE) {
+        template = (struct dom_html_template_element *) elem;
+        template_ind = i;
+        continue;
+      }
+
+      if (elem->namespace == INFRA_NAMESPACE_HTML
+       && elem->local_name == HTML_TAG_TABLE) {
+        table = (struct dom_html_table_element *) elem;
+        table_ind = i;
+        continue;
+      }
+    }
+
+    if (template != NULL && (table == NULL || template_ind < table_ind)) {
+      location.parent = (struct dom_node *) template->template_contents;
+      location.child  = NULL;
+      goto done;
+    }
+
+    if (table == NULL) {
+      /* fragment case */
+      location.parent = treebuilder->open_elements->items[0];
+      location.child  = NULL;
+      goto done;
+    }
+
+    if (((struct dom_node *) table)->parent != NULL) {
+      location.parent = ((struct dom_node *) table)->parent;
+      location.child  = (struct dom_node *) table;
+      goto done;
+    }
+
+    location.parent = treebuilder->open_elements->items[table_ind - 1];
+    location.child  = NULL;
+  } else {
+    location.parent = (struct dom_node *) target;
+    location.child  = NULL;
+  }
+
+done:
+  if (DOM_IMPLEMENTS(location.parent, html_template_element)) {
+    location.parent = (struct dom_node *)
+     ((struct dom_html_template_element *) target)->template_contents;
+    location.child = NULL;
+  }
+
+  return location;
 }
 
 static struct dom_element *
@@ -806,14 +900,32 @@ create_element_for_token(struct treebuilder *treebuilder, struct tag *tag,
   return element;
 }
 
+static void
+insert_element_at_adj_location(struct treebuilder *treebuilder,
+                               struct dom_element *element)
+{
+  struct insertion_location location = appropriate_place(treebuilder, NULL);
+
+  /* XXX Check if possible */
+  dom_insert_node(location.parent, (struct dom_node *) element, location.child, false);
+}
+
 static struct dom_element *
 insert_foreign_element(struct treebuilder *treebuilder,
                        struct tag *tag,
                        enum InfraNamespace namespace,
                        bool only_add_to_element_stack)
 {
-  /* XXX */
-  return NULL;
+  struct insertion_location location = appropriate_place(treebuilder, NULL);
+  struct dom_element *element = create_element_for_token(treebuilder, tag,
+                                 namespace, location.parent);
+
+  if (!only_add_to_element_stack)
+    insert_element_at_adj_location(treebuilder, element);
+
+  push_open_element(treebuilder, element);
+
+  return element;
 }
 
 static struct dom_html_element *
@@ -832,12 +944,45 @@ insert_character(struct treebuilder *treebuilder, uint32_t c)
 }
 
 static void
-insert_comment(struct treebuilder *treebuilder, InfraString *comment,
+insert_comment(struct treebuilder *treebuilder, InfraString *data,
                struct insertion_location position)
 {
-  (void) treebuilder;
-  (void) comment;
-  (void) position;
+  if (position.parent == NULL)
+    position = appropriate_place(treebuilder, NULL);
+
+  struct dom_comment *comment = DOM_NEW_OBJECT( comment );
+
+  ((struct dom_character_data *) comment)->data = infra_string_ref(data);
+
+  ((struct dom_node *) comment)->node_document =
+    dom_weak_ref_object(position.parent->node_document);
+
+  dom_insert_node(position.parent, (struct dom_node *) comment,
+   position.child, false);
+}
+
+static enum treebuilder_status
+generic_raw_text_parse(struct treebuilder *treebuilder,
+                       struct tag *tag)
+{
+  insert_html_element(treebuilder, tag);
+  treebuilder->tokenizer->state = RAWTEXT_STATE;
+  treebuilder->original_mode = treebuilder->mode;
+  treebuilder->mode = TEXT_MODE;
+
+  return TREEBUILDER_STATUS_OK;
+}
+
+static enum treebuilder_status
+generic_rcdata_parse(struct treebuilder *treebuilder,
+                     struct tag *tag)
+{
+  insert_html_element(treebuilder, tag);
+  treebuilder->tokenizer->state = RCDATA_STATE;
+  treebuilder->original_mode = treebuilder->mode;
+  treebuilder->mode = TEXT_MODE;
+
+  return TREEBUILDER_STATUS_OK;
 }
 
 static void
@@ -851,6 +996,7 @@ create_parser(struct tokenizer *tokenizer, struct treebuilder *treebuilder,
   tokenizer->input.end = &input[input_len];
 
   treebuilder->document = dom_strong_ref_object(document);
+  treebuilder->open_elements = infra_stack_create();
 }
 
 static void
@@ -867,9 +1013,9 @@ free_parser(struct tokenizer *tokenizer, struct treebuilder *treebuilder)
   if (tokenizer->tag != NULL)
     destroy_tag(tokenizer->tag);
 
-
   while (treebuilder->open_elements->size > 0)
     pop_open_element(treebuilder);
+  infra_stack_free(treebuilder->open_elements);
 
   dom_strong_unref_object(treebuilder->head);
   dom_strong_unref_object(treebuilder->form);
@@ -892,7 +1038,8 @@ html_parse(struct dom_document *document,
                 document,
                 input, input_len);
 
-  tokenizer.state = DATA_STATE;
+  tokenizer.state  = DATA_STATE;
+  treebuilder.mode = INITIAL_MODE;
 
   tokenizer_mainloop(&tokenizer);
 

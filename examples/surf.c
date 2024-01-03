@@ -4,7 +4,7 @@
 #include <wfs/dom_core.h>
 #include <wfs/html.h>
 
-const char *myfile = "<!DOCTYPE html>\n<html lang='fr' yeet scott=free>TTTTTTTTTTT</html>";
+const char *myfile = "<!-- commento --> <!DOCTYPE html>\n<html lang='fr' yeet scott=free><head></head><body>TTTTTTTTTTT</body></html>";
 
 int
 main(int argc, char *argv[])
